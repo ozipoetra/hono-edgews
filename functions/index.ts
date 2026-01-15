@@ -1,51 +1,49 @@
-// functions/index.ts
 import { Hono } from 'hono';
 
 const app = new Hono();
 
-// Target configuration
 const TARGET_HOST = 'kuota.pandai.my.id';
 const TARGET_URL = `https://${TARGET_HOST}`;
 
-/**
- * Reverse Proxy Logic
- * Handles both standard HTTP and WebSocket (WSS) Upgrades
- */
 app.all('*', async (c) => {
-  const url = new URL(c.req.url);
-  const targetPath = `${TARGET_URL}${url.pathname}${url.search}`;
+  const upgradeHeader = c.req.header('Upgrade');
+  
+  // VLESS WS check
+  if (upgradeHeader === 'websocket') {
+    const url = new URL(c.req.url);
+    const targetUrl = `https://${TARGET_HOST}${url.pathname}${url.search}`;
 
-  // 1. Detect WebSocket Upgrade
-  // If the 'Upgrade' header is present, we return the fetch promise.
-  // EdgeOne will handle the secure tunnel (WSS) automatically.
-  if (c.req.header('Upgrade')?.toLowerCase() === 'websocket') {
-    return fetch(targetPath, {
-      method: c.req.method,
+    // Perform the fetch to the origin
+    const res = await fetch(targetUrl, {
+      method: 'GET',
       headers: {
-        ...c.req.header(),
+        'Upgrade': 'websocket',
+        'Connection': 'Upgrade',
         'Host': TARGET_HOST,
-        'Origin': TARGET_URL,
-      },
+        'Origin': `https://${TARGET_HOST}`,
+        'Sec-WebSocket-Key': c.req.header('Sec-WebSocket-Key') || '',
+        'Sec-WebSocket-Version': '13',
+        // Forward potential V2Ray/Xray headers if they exist
+        'User-Agent': c.req.header('User-Agent') || 'v2ray-proxy',
+      }
     });
+
+    // If the origin server accepts the upgrade (101 Switching Protocols)
+    if (res.status === 101) {
+      return res;
+    }
+    
+    return new Response("WS Upgrade Failed", { status: 502 });
   }
 
-  // 2. Standard HTTP Proxy
-  const proxyReq = new Request(targetPath, {
+  // Standard HTTP fallback
+  return fetch(`${TARGET_URL}${new URL(c.req.url).pathname}`, {
     method: c.req.method,
-    headers: c.req.header(),
+    headers: { ...c.req.header(), 'Host': TARGET_HOST },
     body: c.req.raw.body,
-    // @ts-ignore - Required for streaming bodies in the Edge runtime
+    // @ts-ignore
     duplex: 'half'
   });
-
-  // Overwrite headers to match the target to prevent SSL/SNI errors
-  proxyReq.headers.set('Host', TARGET_HOST);
-  proxyReq.headers.set('Origin', TARGET_URL);
-
-  return fetch(proxyReq);
 });
 
-// EdgeOne Pages requirement: Export the onRequest handler
-export const onRequest = (context: any) => {
-  return app.fetch(context.request, context.env, context);
-};
+export const onRequest = (context: any) => app.fetch(context.request, context.env, context);
